@@ -1,0 +1,43 @@
+---
+title:  "十行代码看到空气质量指数"
+author: "WBR"
+categories: ["R"]
+date: 2018-04-25
+tags: ["datamining"]
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## 背景
+
+数据挖掘是结合了数学、统计学以及计算机科学还有编程技术，所以这门学科的抽象以及复杂度往往让人觉得高处不胜寒。传统印象中数据挖掘离我们很遥远，大多都是应用在与庞大数据有关的科研领域，其实生活中数据无处不在，我们都会和数据打交道，数据挖掘技术不仅仅能应用在高端复杂领域，也可以应用在我们生活中的小事上，比如我们每天都会关注的空气质量。这个小应用不足十行代码，就能让我们看到一个关于空气质量的指数的可视化地图。
+
+## 操作
+
+空气质量指数（Air Quality Index，简称AQI）是定量描述空气质量状况的无量纲指数，R语言的强大之处在于丰富的第三方扩展库，代码之前，先介绍下出场的一个新包，leafletCN。leafletCN 是一个基于 leaflet包做的大中华扩展，优势在于有细分到县级市级别的区划数据，虽然没那么准，但是也基本能用了。
+
+AQI 的数据来源于 pm25.in，网页上是一个 html 的表格，可以简单的用 XML 的 readHTMLtable 来完成读取。
+
+```{r}
+library(XML)
+library(leafletCN)
+
+url = htmlParse("http://www.pm25.in/rank", encoding="UTF-8") 
+table = readHTMLTable(url, encoding="UTF-8", stringsAsFactors = F)[[1]]
+
+# 整理数据并命名
+dat = table[ , 2:3]
+names(dat) = c("city","AQI")
+dat$AQI = as.numeric(dat$AQI)
+
+# 调用geojsonMap进行绘制
+geojsonMap(dat, "city",
+           popup =  paste0(dat$city, ":", dat$AQI),
+           palette = "Reds", legendTitle = "AQI")
+```
+
+## 读图
+
+通过地图可以看到，最近北上广这些大城市的空气质量不错，山东河北还有东北这些老工业区空气质量不太好。至于新疆的空气质量为什么差呢？应该和沙尘暴有关。
