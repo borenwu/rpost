@@ -1,0 +1,368 @@
+---
+title:  "量化投资策略之均值回归"
+author: "WBR"
+categories: ["R"]
+date: 2018-04-28
+tags: ["datamining","finance"]
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## 背景
+
+文章数据和代码来自于张丹的《均值回归，逆市中的投资机会》
+
+在股票市场中有两种典型的投资策略：趋势追踪(Trend Following) 和 均值回归(Mean Reversion)。 趋势追踪策略的特点在大行情的波动段找到有效的交易信号，不仅简单而且有效，而均值回归策略则是一种反趋势策略，一波大幅上涨后容易出现下跌，而一波大幅下跌后容易出现上涨。其特点在振荡的在震荡的市场中非常有效，捕捉小的机会，本文就将介绍这种策略。
+
+
+## 原理
+
+均值回归的原理用一个词概括就是物极必反，股票不可能永远在涨，也不可能一直在跌，它的价格总是围绕着一个均值在上下波动
+
+![](http://blog.fens.me/wp-content/uploads/2015/07/01.png)
+
+就以平安银行(000001)的日K线为例，可以非常直观地看到均值回归这种现象，20015年到2015年7月的数据。
+
+上图中有3条曲线，黑色线是平安银行向前复权后的每日股价，红色线为20日均线，蓝色线为60日均线。 图中还有一条红色的水平线虚线，是这10年的股价平均值等于7.14元。这10年间，平安银行的股价经历了几波上涨和下跌，多次穿越7.14平均值。那么这个现象就是我们要讨论的均值回归。
+
+通过十年的K线图，我们看到了平安银行的价格走势和均值线，但是在实际操作中，我们不可能把钱放在股市中不闻不问，等个十年，来个大行情。于是我们就要对股价均值重新定义，用20日的均值来代替长期均值，在短周期内找到投资策略。
+
+算法流程如下:
+
+`N日平均值     =  [T日股价 + (T-1)日股价 + ... + (T-(N-1))日股价]/N`
+
+`差值          =  N日平均值 - N日股价`
+`N日差值均值   =  [T日差值 + (T-1)日差值 + ... + (T-(N-1))日差值]/N`
+
+`N日差值标准差 =  sqrt([(T日差值 - T日差值均值)^2 + ... + ((T-(N-1))日差值`- `(T-(N-1))日差值均值)^2 ]/N)`
+
+然后计算偏离点：
+
+`T日差值 > T日差值标准差 * 2`
+
+我们以偏离点作为买入信号点，以均线和股价的下一个交点做为卖出信号点。这样我们就把均值回归的投资理论，变成了一个数学模型。
+
+## 实现
+
+首先观察数据集：
+
+`000001.SZ,2014-07-02,8.14,8.18,8.10,8.17,28604171`
+
+每一列说明：
+
+- 第1列：股票代码
+- 第2列：交易日期
+- 第3列：开盘价
+- 第4列：最高价
+- 第5列：最低价
+- 第6列：收盘价
+- 第7列：交易量
+
+```{r}
+# 引用函数库
+library(plyr)
+library(xts)
+library(TTR)
+library(ggplot2)
+library(scales)
+library(knitr)
+
+# 构建读取数据文件函数
+read<-function(file){ 
+  df<-read.table(file=file,header=FALSE,sep = ",", na.strings = "NULL") 
+  names(df)<-c("code","date","Open","High","Low","Close","Volume") 
+  dl<-split(df[-1],df$code)                                      
+  
+  lapply(dl,function(row){                        
+      xts(row[-1],order.by = as.Date(row$date))
+  })
+}
+
+# 读取数据表格文件
+data<-read("stock.csv")
+# 查看股票000001.SZ
+head(data[['000001.SZ']])
+```         
+
+
+准好数据之后就可以建立模型了。我们截取2015年初到7月的数据来创建模型，以平安银行为例，首先画出日K线和均线
+
+```{r}
+
+# 日期选择函数
+dateArea<-function(sDate=Sys.Date()-365,eDate= Sys.Date(),before=0){ 
+    if(class(sDate)=='character') sDate=as.Date(sDate)
+    if(class(eDate)=='character') eDate=as.Date(eDate)  
+    return(paste(sDate-before,eDate,sep="/"))
+}
+
+# 计算移动平均线函数
+ma<-function(cdata,mas=c(5,20,60)){
+    if(nrow(cdata)<=max(mas)) return(NULL)
+    ldata<-cdata
+    for(m in mas){
+        ldata<-merge(ldata,SMA(cdata,m))
+    }
+    names(ldata)<-c('Value',paste('ma',mas,sep=''))
+    return(ldata)
+}
+
+
+# 作图函数
+drawLine<-function(ldata,titie="Stock_MA",sDate=min(index(ldata)),eDate=max(index(ldata)),breaks="1 year",avg=FALSE,out=FALSE){
+    if(sDate<min(index(ldata))) sDate=min(index(ldata))
+    if(eDate>max(index(ldata))) eDate=max(index(ldata))  
+    ldata<-na.omit(ldata)
+    
+    g<-ggplot(aes(x=Index, y=Value),data=fortify(ldata[,1],melt=TRUE))
+    g<-g+geom_line()
+    g<-g+geom_line(aes(colour=Series),data=fortify(ldata[,-1],melt=TRUE))
+
+    if(avg){
+        meanVal<<-round(mean(ldata[dateArea(sDate,eDate)]$Value),2)
+        g<-g+geom_hline(aes(yintercept=meanVal),color="red",alpha=0.8,size=1,linetype="dashed")
+        g<-g+geom_text(aes(x=sDate, y=meanVal,label=meanVal),color="red",vjust=-0.4)
+    }
+    g<-g+scale_x_date(labels=date_format("%Y-%m"),breaks=date_breaks(breaks),limits = c(sDate,eDate))
+    g<-g+ylim(min(ldata$Value), max(ldata$Value))
+    g<-g+xlab("") + ylab("Price")+ggtitle(title)
+    g
+}
+
+
+# 开始获取数据并作图
+title<-'000001.SZ'
+SZ000001<-data[[title]]                            
+sDate<-as.Date("2015-01-01")      
+eDate<-as.Date("2015-07-10")                     
+cdata<-SZ000001[dateArea(sDate,eDate,360)]$Close   
+ldata<-ma(cdata,c(5,20,60))                 
+drawLine(ldata,title,sDate,eDate,'1 month',TRUE)
+
+```
+
+
+如图所示，60日的移动平均线是最平滑的，5日的移动平均线是波动最大的。5日平均线和股价的交叉，明显多于60日平均线和股价的交叉。那么可以说在相同的时间周期内，短周期的移动平均线，比长周期的移动平均线更具有均值回归的特点。
+
+接下来我们要分别计算不同周期的股价与移动平均线的差值的平均标准差。
+
+```{r}
+# 标准差函数
+getMaSd<-function(ldata,mas=20,sDate,eDate){
+  if(is.null(ldata) || nrow(ldata)<= max(mas)) return(NULL)          
+  col<-paste('ma',mas,sep='')
+  ldata<-ldata[,c("Value",col)]                     
+  ldata$dif<-ldata[,col]-ldata$Value          
+  ldata$sd<-runSD(ldata[,"dif"],mas)               
+  ldata$rate<-round(ldata$dif/ldata$sd,2)        
+  ldata[dateArea(sDate,eDate)]                   
+}
+
+# 5日平均线的差值、平均标准差
+ldata5<-getMaSd(ldata,5,sDate,eDate)
+head(ldata5)
+
+# 20日平均线的差值、平均标准差
+ldata20<-getMaSd(ldata,20,sDate,eDate)
+head(ldata20)
+
+# 60日平均线的差值、平均标准差
+ldata60<-getMaSd(ldata,60,sDate,eDate)
+head(ldata60)
+
+```
+
+
+5日的平均线的差值和平均标准差是最小的，而60日的平均线的差值和平均标准差是最大的。如果我们以5日移动平均线做为均值时，会频繁进行交易，但每次收益都很小，可能都不够手续费的成本；另一方面，如果我们以60日移动平均线做为均值时，交易次数会较少，但可能会出现股票成形趋势性上涨或下跌，长时间不能回归的情况，可能会造成现金头寸的紧张。综合上面的2种情况，我们可以选择20日均线作为均值的标的。
+
+根据模型的计算公式，当差值超过2倍的平均标准差时，我们认为股价出现了偏离，以偏离点做为模型的买入信号，当均线和股价再次相交时做为卖出信号。在上一步，我们已经计算出了偏离值，并保存在rate列中。下面我们要找到大于2倍标准化差的点，并画图。
+
+```{r}
+# 买入信号点计算的函数
+buyPoint<-function(ldata,x=2,dir=2){     
+    idx<-which(ldata$rate>x)           
+    if(dir==2){                      
+        idx<-c(idx,which(ldata$rate<x*-1))
+    }
+    return(ldata[idx,])                                  
+}
+
+# 作图
+drawPoint<-function(ldata,pdata,titie,sDate,eDate,breaks="1 year"){
+  ldata<-na.omit(ldata)
+  g<-ggplot(aes(x=Index, y=Value),data=fortify(ldata[,1],melt=TRUE))
+  g<-g+geom_line()
+  g<-g+geom_line(aes(colour=Series),data=fortify(ldata[,-1],melt=TRUE))
+  
+  if(is.data.frame(pdata)){
+    g<-g+geom_point(aes(x=Index,y=Value,colour=op),data=pdata,size=4)
+  }else{
+    g<-g+geom_point(aes(x=Index,y=Value,colour=Series),data=na.omit(fortify(pdata,melt=TRUE)),size=4)  
+  }
+  g<-g+scale_x_date(labels=date_format("%Y-%m"),breaks=date_breaks(breaks),limits = c(sDate,eDate))
+  g<-g+xlab("") + ylab("Price")+ggtitle(title)
+  g
+}
+
+buydata<-buyPoint(ldata20,2,2)      
+drawPoint(ldata20[,c(1,2)],buydata$Value,title,sDate,eDate,'1 month')
+```
+图中蓝色的点就是买入的信号点，由于股票我们只能进行单向交易，即低买高卖，并不能直接做空，所以我们要过滤股价高于移动平均线的点，只留下股价低于移动平均线的点，就是我们的买入信号点。
+
+
+```{r}
+buydata<-buyPoint(ldata20,2,1) # 做多信号点
+drawPoint(ldata20[,c(1,2)],buydata$Value,title,sDate,eDate,'1 month') # 作图
+```
+
+计算卖出的信号点，当买入后，下一个股价与移动平均线的交点就是卖出的信号点。
+
+```{r}
+# 卖出信号点
+sellPoint<-function(ldata,buydata){  
+    buy<-buydata[which(buydata$dif>0),]
+
+    aidx<-index(ldata[which(ldata$dif<=0),])
+    sellIdx<-sapply(index(buy),function(ele){
+        head(which(aidx>ele),1)
+    })
+    ldata[aidx[unique(unlist(sellIdx))]]
+}
+
+# 信号点数据
+selldata<-sellPoint(ldata20,buydata)
+
+# 买入信号点和卖出信号点通过一张图表现出来
+bsdata<-merge(buydata$Value,selldata$Value)
+names(bsdata)<-c("buy","sell")
+drawPoint(ldata20[,c(1,2)],bsdata,title,sDate,eDate,'1 month')
+```
+
+从图上看，我们在绿色点位置进行买入，而在蓝色点位置进行卖出，确实是赚钱的。赚了多少钱，需要计算。假设以10万人民币为本金，买入信号出现时，以收盘价买入，每次都是话1万元购买股票。如果连续出现买入信号，那就一直买入。卖出信号出现时，就以收盘价卖出，一次性平仓信号对应的股票。假设没有手续费。
+
+```{r}
+# 合并交易信号
+signal<-function(buy, sell){
+  selldf<-data.frame(sell,op=as.character(rep("S",nrow(sell))))
+  buydf<-data.frame(buy,op=as.character(rep("B",nrow(buy))))
+  sdata<-rbind(buydf,selldf)                        
+  sdata[order(as.Date(row.names(sdata))),]
+}
+
+sdata<-signal(buydata,selldata)
+
+# 模拟交易
+trade<-function(sdata,capital=100000,fixMoney=10000){
+    amount<-0
+    cash<-capital
+
+    ticks<-data.frame()
+    for(i in 1:nrow(sdata)){
+        row<-sdata[i,]
+        if(row$op=='B'){
+        if(cash<fixMoney){
+                print(paste(row.names(row),"No enough cash"))
+                next
+        }
+        amount0<-floor(fixMoney/row$Value)
+        amount<-amount+amount0
+        cash<-cash-amount0*row$Value
+        }
+        
+        if(row$op=='S'){
+        cash<-cash+amount*row$Value
+        amount<-0
+        }
+        
+        row$cash<-round(cash,2)
+        row$amount<-amount
+        row$asset<-round(cash+amount*row$Value,2)
+        ticks<-rbind(ticks,row)
+    }   
+        
+    ticks$diff<-c(0,round(diff(ticks$asset),2))
+    rise<-ticks[intersect(which(ticks$diff>0),which(ticks$op=='S')),] 
+    fall<-ticks[intersect(which(ticks$diff<0),which(ticks$op=='S')),] 
+
+    return(list(
+        ticks=ticks,
+        rise=rise,
+        fall=fall
+    ))
+}
+
+# 交易结果
+result<-trade(sdata,100000,10000)  
+```
+
+查看一下每一笔交易
+```{r}
+result$ticks
+```
+一共发生了5笔交易，其中4笔买入，1笔卖出。最后，资金剩余103275.88元，赚了3275.88元，收益率3.275%。
+
+在卖出时，赚钱的交易有1笔。
+```{r}
+result$rise
+```
+
+在卖出时，赔钱的交易，没有发生。
+```{r}
+result$fall
+```
+
+画出资产净值和股价
+
+```{r}
+drawAsset<-function(ldata,adata,sDate=FALSE,capital=100000){
+  if(!sDate) sDate<-index(ldata)[1]
+  adata<-rbind(adata,as.xts(capital,as.Date(sDate)))
+  
+  g<-ggplot(aes(x=Index, y=Value),data=fortify(ldata[,1],melt=TRUE))
+  g<-g+geom_line()
+  g<-g+geom_line(aes(x=as.Date(Index), y=Value,colour=Series),data=fortify(adata,melt=TRUE))
+  g<-g+facet_grid(Series ~ .,scales = "free_y")
+  g<-g+scale_y_continuous(labels=dollar_format(prefix = "￥"))
+  g<-g+scale_x_date(labels=date_format("%Y-%m"),breaks=date_breaks("2 months"),limits = c(sDate,eDate))
+  g<-g+xlab("") + ylab("Price")+ggtitle(title)
+  g
+}
+
+drawAsset(ldata20,as.xts(result$ticks['asset'])) 
+
+```
+
+现在我们来试试看乐视网
+
+```{r}
+quick<-function(title,sDate,eDate){ 
+  stock<-data[[title]]
+  cdata<-stock[dateArea(sDate,eDate,360)]$Close
+  ldata<-ma(cdata,c(20))
+  ldata<-getMaSd(ldata,20,sDate,eDate)
+  buydata<-buyPoint(ldata,2,1)  
+  selldata<-sellPoint(ldata,buydata)
+  sdata<-signal(buydata,selldata)
+  return(trade(sdata))
+}
+
+
+title<-"300104.SZ"
+sDate<-as.Date("2015-01-01")
+eDate<-as.Date("2015-07-10")
+quick(title,sDate,eDate)
+
+stock<-data[[title]]
+cdata<-stock[dateArea(sDate,eDate,360)]$Close
+ldata<-ma(cdata,c(20))
+ldata<-getMaSd(ldata,20,sDate,eDate)
+buydata<-buyPoint(ldata,2,1)  
+selldata<-sellPoint(ldata,buydata)
+bsdata<-merge(buydata$Value,selldata$Value)
+names(bsdata)<-c("buy","sell")
+drawPoint(ldata[,c(1,2)],bsdata,title,sDate,eDate,'1 month')
+```
+
+从数据结果看，我们又赚到了。一共发生了8笔交易，其中7笔买入，1笔卖出。最后，资金剩余109438.80元，赚了9438.80元，收益率9.43%。
